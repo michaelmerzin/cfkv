@@ -1,0 +1,64 @@
+# CF-KV: Closed-Form KV Prediction for Training-Free Shallow Prefill
+
+Anonymous code release for review.
+
+During prefill, prompt tokens stop at a mid-depth layer `j`. For every upper layer, their keys and values are predicted
+from their lower-layer hidden states by one linear map fitted in closed form (a ridge regression on unlabeled text, with
+no gradient-based training). Optionally, the predicted keys are rescaled to the variance of the true keys (`--gammas 0,1`),
+also in closed form. The last prompt token, an optional exact window and all generated tokens run the full model.
+
+## Requirements
+
+Python 3.11, PyTorch 2.7, Hugging Face `transformers` 5.x, `numpy`, `pyarrow`, `huggingface_hub`. One GPU: a 12 GB GPU is
+enough for Qwen2.5-1.5B; the 7-8B models need about 40 GB and Mistral-Small-24B an 80 GB GPU.
+
+All models and datasets are public. Set `CFKV_HF_HUB` to your Hugging Face hub cache (default `~/.cache/huggingface/hub`)
+and download the models and datasets listed in `src/engine.py` (`MODELS`) and in the evaluation scripts. All paths in the
+code are relative to this directory; set `CFKV_ROOT` if you move `src/`.
+
+## Data
+
+`data/gen_calib.pt` and `data/gen_val.pt` hold the calibration and validation chat prompts with the greedy responses used
+in the paper (lists of strings). The WikiText-103 part of the calibration set is read from the public dataset.
+
+## Quick start
+
+```bash
+python src/main_eval.py --model qwen1.5b --js 19,14 --methods cfkv,pop --tasks gsm8k,mmlu --limit 50 --run_id demo
+```
+
+## Reproducing the paper
+
+| Result | Command (one GPU each) |
+|---|---|
+| Main table, all methods and benchmarks | `python src/main_eval.py --model <m> --js <j1>,<j2> --methods cfkv,pop,drop,fastkv,selcfkv,prune --tasks gsm8k,math500,humaneval,mbpp,cnndm,mmlu,arc,hellaswag --run_id <id>` |
+| Table and figure generation | `python scripts/make_main_table.py --apply`, `python scripts/make_frontier_unified.py` |
+| Controlled build-up ablation | `python src/main_eval.py --model <m> --js <j> --methods cfkv --feat single\|both --gammas 0\|1 --tasks gsm8k,humaneval,mmlu --run_id <id>`, then `python scripts/make_components_table.py` |
+| Error bars (five calibration refits) | `python src/errbars.py --model <m> --j <j> --run_id <id>`, then `python scripts/make_errbars_table.py` |
+| Prefill latency and throughput | `python src/fastpath.py --model qwen7b --js 14,19 --run_id <id>` (add `--pop_cost 1` for the comparison with a POP-cost predictor), `python src/throughput.py ...` |
+| Accuracy through the timed implementation | `python src/fastpath_eval.py --model qwen7b --j 14 --run_id <id>`, then `python scripts/make_fastpath_table.py` |
+| Long context (needles, LongBench) and cache reuse | `python src/longctx.py ...`, `python src/reuse2.py ...`, `python src/scbench_eval.py ...` |
+| Per-layer R² and drift | `python src/analysis.py --model <m> --j <j> --alpha <a> --run_id <id>` |
+| What must stay exact | `python src/optwin.py ...` |
+
+Depths used in the paper: `--js 19,14` for the 28-layer Qwen models, `--js 22,16` for Llama-3.1-8B and Mistral-7B, and
+`--model mistral24b --js 27,20` for Mistral-Small-24B-Instruct-2501 (its runs are named `m24_*`; the table scripts read them). `scripts/slurm/job.sbatch` is a generic SLURM wrapper
+(`sbatch scripts/slurm/job.sbatch <script.py> [args]`).
+
+## Results
+
+Each run writes its results to `results/raw/<run_id>/metrics.json`. The table and figure scripts in `scripts/` read these files
+and write LaTeX tables to `paper/`; create it first with `mkdir -p paper/figures`.
+
+## Layout
+
+| Path | Contents |
+|---|---|
+| `src/engine.py` | Engine for Qwen2, Llama and Mistral decoder layers: calibration statistics (`fit_grams`), ridge solve (`solve`), batched prefill with the context tokens' upper-layer KV from `exact` / `predict` (CF-KV) / `naive` (POP) / `drop` / `swiftkv`, attention-selected exact tokens (`keep`), and batched greedy decoding. |
+| `src/main_eval.py` | Unified evaluation: configuration selection on held-out text, then all methods and benchmarks at both depths. |
+| `src/fastpath.py`, `src/fastpath_eval.py` | Compute-saving prefill where context tokens really stop at layer `j`; timing, and benchmark accuracy through that implementation. |
+| `src/round2.py`, `src/gen_bench.py`, `src/extra_bench.py`, `src/mbpp_eval.py` | Task loaders and runners (MMLU, GSM8K, MATH-500, HumanEval, CNN/DailyMail, ARC-C, HellaSwag, MBPP); ShortGPT layer pruning. |
+| `src/kscale.py` | Variance-matched keys. |
+| `src/errbars.py`, `src/analysis.py`, `src/rf_probe.py`, `src/optwin.py`, `src/ablate_calib.py` | Error bars, per-layer R², random-feature probe, exact-set study, calibration ablation. |
+| `src/longctx.py`, `src/reuse2.py`, `src/reuse_test.py`, `src/scbench_eval.py`, `src/throughput.py` | Long context, cache reuse, SCBench, batched throughput. |
+| `scripts/` | Table and figure generators (read `results/raw/`, write `paper/`). |
